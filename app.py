@@ -13,36 +13,26 @@ from google.genai import types
 # CẤU HÌNH GIAO DIỆN & BỘ NHỚ
 # ==========================================
 st.set_page_config(page_title="Máy Dịch Đam Mỹ", page_icon="🏳️‍🌈", layout="wide")
-st.title("🏳️‍🌈 Máy Dịch Đam Mỹ Siêu Tốc (Quản Lý Từng Chương)")
+st.title("🏳️‍🌈 Máy Dịch Đam Mỹ (Hệ thống duyệt trước)")
 
-# Khởi tạo bộ nhớ để không bị mất dữ liệu khi bấm nút
+# Khởi tạo bộ nhớ cho các bước
 if "chunks" not in st.session_state:
     st.session_state.chunks = []
 if "results" not in st.session_state:
     st.session_state.results = {}
 if "api_keys" not in st.session_state:
     st.session_state.api_keys = []
+if "show_preview" not in st.session_state:
+    st.session_state.show_preview = False
 
 # ==========================================
 # CÂU LỆNH YÊU CẦU AI DỊCH
 # ==========================================
-DANMEI_PROMPT = """Bạn là một dịch giả chuyên nghiệp, chuyên dịch tiểu thuyết đam mỹ Trung Quốc sang tiếng Việt. Tôi sẽ cung cấp cho bạn một bộ truyện bằng tiếng Trung Quốc từ một truyện đam mỹ, bao gồm tựa đề, nội dung và thông tin chương. Nhiệm vụ của bạn là dịch các chương truyện này sang tiếng Việt, tuân thủ các nguyên tắc sau:
-
-Giữ nguyên phong cách văn học mạng: Sử dụng ngôn ngữ và giọng văn phù hợp với thể loại đam mỹ,... các xưng hô cho phù hợp với thiết lập nhân vật và nhân xưng của tiếng việt (Anh-em; anh-tôi;tôi-cậu. Giữ nguyên xưng hô xuyên suốt đoạn dịch không tự ý thay đổi khi đã xuất bản dịch.
-
-Ngữ pháp chuẩn xác: Đảm bảo bản dịch tuân thủ ngữ pháp tiếng Việt, dễ đọc, dễ hiểu.
-
-Nếu 1 số câu của tác giả quá khô cứng và tối nghĩa nếu dịch theo Hán Việt, thì hãy chuyển qua văn phong thuần Việt sao cho dễ hiểu.
-
-Xử lý danh từ riêng: Giữ nguyên tất cả các danh từ riêng như tên người, địa điểm, môn phái, võ công,... ở dạng Trung Quốc gốc.
-Trừ các danh từ riêng TÊN NHÂN VẬT, ĐỊA DANH, ĐỊA ĐIỂM, phải dịch thuần việt, TUYỆT ĐỐI KHÔNG LẠM DỤNG HÁN VIỆT.
-
-Dịch : (bản dịch đúng văn phong tác giả).
-
-Hãy sau mỗi đoạn xuống dòng giữa các câu cho dễ đọc.
-Dịch hết đoạn tôi đã gửi. Tuyệt đối không được dừng giữa chừng và tự ý thêm tình tiết truyện. Hết văn bản tôi gửi là phải lập tức dừng lại.
-
-Lưu ý: Chỉ output kết quả tiếng Việt, không cần lặp lại các hướng dẫn và ví dụ. Hãy sẵn sàng nhận nhiệm vụ!"""
+DANMEI_PROMPT = """Bạn là một dịch giả chuyên nghiệp, chuyên dịch tiểu thuyết đam mỹ Trung Quốc sang tiếng Việt. Tôi sẽ cung cấp cho bạn một bộ truyện bằng tiếng Trung Quốc từ một truyện đam mỹ. Nhiệm vụ của bạn là dịch sang tiếng Việt, tuân thủ các nguyên tắc sau:
+Giữ nguyên phong cách văn học mạng, xưng hô phù hợp thiết lập nhân vật (Anh-em; anh-tôi; tôi-cậu...). Giữ nguyên xưng hô xuyên suốt.
+Ngữ pháp chuẩn xác, dễ hiểu. Câu nào Hán Việt tối nghĩa thì dịch thuần Việt.
+Giữ nguyên danh từ riêng, võ công... Trừ TÊN NHÂN VẬT, ĐỊA DANH phải thuần Việt.
+Dịch hết đoạn tôi đã gửi, không tự ý thêm bớt. Chỉ output kết quả tiếng Việt!"""
 
 # ==========================================
 # CÁC HÀM TÁCH CHƯƠNG & DỊCH
@@ -100,7 +90,8 @@ def worker_translator(api_key, task_queue, results_dict):
                 response = client.models.generate_content(
                     model="gemini-2.5-flash", contents=chapter_data["content"], config=config
                 )
-                results_dict[idx] = {"title": chapter_data["title"], "translated": response.text}
+                # Đánh dấu trạng thái OK (Xanh)
+                results_dict[idx] = {"title": chapter_data["title"], "translated": response.text, "status": "ok"}
                 success = True
             except Exception as e:
                 err_msg = str(e).lower()
@@ -110,13 +101,12 @@ def worker_translator(api_key, task_queue, results_dict):
                 else: break
         
         if not success:
-            results_dict[idx] = {"title": chapter_data["title"], "translated": "❌ LỖI: API Key bị chặn hoặc lỗi. Vui lòng bấm nút 'Dịch lại' ở dưới."}
+            # Đánh dấu trạng thái ERROR (Đỏ)
+            results_dict[idx] = {"title": chapter_data["title"], "translated": "❌ LỖI: API Key bị chặn hoặc lỗi mạng. Vui lòng bấm 'Dịch lại'!", "status": "error"}
         task_queue.task_done()
 
 def retry_single_chapter(idx):
-    if not st.session_state.api_keys:
-        return
-    # Lấy ngẫu nhiên 1 key trong danh sách để thử lại
+    if not st.session_state.api_keys: return
     key = random.choice(st.session_state.api_keys)
     chunk = st.session_state.chunks[idx]
     
@@ -130,34 +120,28 @@ def retry_single_chapter(idx):
         ]
         config = types.GenerateContentConfig(system_instruction=DANMEI_PROMPT, safety_settings=safety_settings, temperature=0.3)
         response = client.models.generate_content(model="gemini-2.5-flash", contents=chunk["content"], config=config)
-        
-        st.session_state.results[idx] = {"title": chunk["title"], "translated": response.text}
+        st.session_state.results[idx] = {"title": chunk["title"], "translated": response.text, "status": "ok"}
     except Exception as e:
-        st.session_state.results[idx] = {"title": chunk["title"], "translated": f"❌ Vẫn bị lỗi: {e}"}
+        st.session_state.results[idx] = {"title": chunk["title"], "translated": f"❌ Vẫn bị lỗi: {e}", "status": "error"}
 
 # ==========================================
-# KHU VỰC NHẬP LIỆU
+# GIAO DIỆN CHÍNH (BƯỚC 1: NHẬP LIỆU)
 # ==========================================
+st.markdown("### BƯỚC 1: CẤU HÌNH & NẠP TRUYỆN")
 col1, col2 = st.columns([1, 2])
 with col1:
-    st.subheader("🔑 1. Cấu hình")
-    keys_input = st.text_area("Nhập API Keys (Mỗi dòng 1 key):", height=150)
-    split_method = st.radio("Chọn cách chia:", ["Tự động nhận diện Chương (第一章...)", "Cắt đều theo số chữ"])
+    keys_input = st.text_area("🔑 Nhập API Keys (Mỗi dòng 1 key):", height=150)
+    split_method = st.radio("✂️ Chọn cách chia chương:", ["Tự động nhận diện Chương (第一章...)", "Cắt đều theo số chữ"])
     word_count = 2000
     if split_method == "Cắt đều theo số chữ":
         word_count = st.number_input("Số chữ mỗi phần:", value=2000, step=500)
 
 with col2:
-    st.subheader("📥 2. Nguồn Truyện")
-    uploaded_file = st.file_uploader("Tải file truyện (.txt)", type=['txt'])
-    raw_text = st.text_area("Hoặc dán truyện vào đây:", height=200)
+    uploaded_file = st.file_uploader("📥 Tải file truyện (.txt)", type=['txt'])
+    raw_text = st.text_area("Hoặc dán truyện vào đây:", height=100)
 
-st.markdown("---")
-
-# ==========================================
-# NÚT BẮT ĐẦU DỊCH ĐỒNG LOẠT
-# ==========================================
-if st.button("🚀 BẮT ĐẦU TÁCH CHƯƠNG & DỊCH (Xóa dữ liệu cũ)", type="primary", use_container_width=True):
+# NÚT XEM TRƯỚC CHƯƠNG
+if st.button("🔍 PHÂN TÍCH & XEM TRƯỚC DANH SÁCH CHƯƠNG", use_container_width=True):
     api_keys = [k.strip() for k in keys_input.split('\n') if k.strip()]
     final_raw_text = ""
     if uploaded_file is not None:
@@ -171,17 +155,39 @@ if st.button("🚀 BẮT ĐẦU TÁCH CHƯƠNG & DỊCH (Xóa dữ liệu cũ)",
         st.error("❌ Vui lòng tải file hoặc dán nội dung!")
     else:
         st.session_state.api_keys = api_keys
-        
+        # Tiến hành cắt chương
         if split_method == "Tự động nhận diện Chương (第一章...)":
             chunks = split_by_chapter_title(final_raw_text)
             if not chunks:
+                st.warning("⚠️ Không tìm thấy tên chương, tự động chuyển sang cắt theo số chữ.")
                 chunks = split_by_word_count(final_raw_text, 2000)
         else:
             chunks = split_by_word_count(final_raw_text, word_count)
             
+        # Lưu vào bộ nhớ và kích hoạt chế độ xem trước
         st.session_state.chunks = chunks
-        st.session_state.results = {}
-        
+        st.session_state.results = {} # Reset kết quả cũ nếu có
+        st.session_state.show_preview = True
+
+st.markdown("---")
+
+# ==========================================
+# BƯỚC 2: XEM TRƯỚC DANH SÁCH & BẮT ĐẦU DỊCH
+# ==========================================
+if st.session_state.show_preview and not st.session_state.results:
+    st.markdown("### BƯỚC 2: DUYỆT DANH SÁCH CHƯƠNG")
+    st.success(f"✅ Hệ thống đã phân tích và chia truyện thành **{len(st.session_state.chunks)} phần**.")
+    
+    # Hiển thị danh sách xem trước trong một khung cuộn
+    with st.container(height=300):
+        for i, c in enumerate(st.session_state.chunks):
+            st.markdown(f"**{i+1}. {c['title']}** *(Khoảng {len(c['content'])} chữ)*")
+    
+    st.warning("☝️ Hãy lướt xem danh sách trên đã chia đúng ý bạn chưa. Nếu OK thì bấm nút bên dưới để bắt đầu dịch.")
+    
+    # NÚT BẮT ĐẦU DỊCH THỰC SỰ
+    if st.button("🚀 XÁC NHẬN BẮT ĐẦU DỊCH ĐỒNG LOẠT", type="primary", use_container_width=True):
+        chunks = st.session_state.chunks
         total_chunks = len(chunks)
         task_queue = queue.Queue()
         for i, chunk in enumerate(chunks):
@@ -189,7 +195,7 @@ if st.button("🚀 BẮT ĐẦU TÁCH CHƯƠNG & DỊCH (Xóa dữ liệu cũ)",
             
         temp_results = {}
         threads = []
-        for key in api_keys:
+        for key in st.session_state.api_keys:
             t = threading.Thread(target=worker_translator, args=(key, task_queue, temp_results))
             t.start()
             threads.append(t)
@@ -209,26 +215,23 @@ if st.button("🚀 BẮT ĐẦU TÁCH CHƯƠNG & DỊCH (Xóa dữ liệu cũ)",
         progress_bar.progress(1.0)
         status_text.success("🎉 ĐÃ DỊCH XONG TOÀN BỘ!")
         st.session_state.results = temp_results
+        st.rerun() # Tải lại trang để hiện BƯỚC 3
 
 # ==========================================
-# KHU VỰC HIỂN THỊ TỪNG CHƯƠNG & TẢI XUỐNG
+# BƯỚC 3: QUẢN LÝ TỪNG CHƯƠNG & TẢI XUỐNG
 # ==========================================
 if st.session_state.results:
-    st.markdown("---")
+    st.markdown("### BƯỚC 3: KIỂM TRA & TẢI XUỐNG")
     
-    # 1. KHU VỰC TẢI FILE
-    st.subheader("💾 LƯU BẢN DỊCH VỀ MÁY")
-    
+    # Gom dữ liệu để chuẩn bị tải xuống
     combined_text = ""
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for i in range(len(st.session_state.chunks)):
             item = st.session_state.results.get(i)
-            if item:
-                # Gộp txt
+            if item and item.get("status") == "ok": # Chỉ lưu các file dịch thành công
                 combined_text += f"{item['title']}\n\n{item['translated']}\n\n{'='*40}\n\n"
-                # Nén zip
                 safe_title = re.sub(r'[\\/*?:"<>|]', "", item["title"]).strip()
                 file_name = f"Chuong_{i+1:03d}_{safe_title}.txt"
                 content = f"{item['title']}\n\n{item['translated']}"
@@ -236,31 +239,34 @@ if st.session_state.results:
                 
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
-        st.download_button("📄 TẢI 1 FILE .TXT GỘP", data=combined_text.encode('utf-8'), file_name="Truyen_Dam_My_Gop.txt", mime="text/plain", use_container_width=True)
+        st.download_button("📄 TẢI 1 FILE .TXT GỘP", data=combined_text.encode('utf-8'), file_name="Truyen_Gop.txt", mime="text/plain", use_container_width=True)
     with col_dl2:
-        st.download_button("📦 TẢI FILE .ZIP (Gồm các chương lẻ)", data=zip_buffer.getvalue(), file_name="Truyen_Dam_My_Cac_Chuong.zip", mime="application/zip", use_container_width=True)
+        st.download_button("📦 TẢI FILE .ZIP (Gồm các chương lẻ)", data=zip_buffer.getvalue(), file_name="Truyen_Cac_Chuong.zip", mime="application/zip", use_container_width=True)
 
-    # 2. KHU VỰC QUẢN LÝ TỪNG CHƯƠNG
     st.markdown("---")
-    st.subheader("📖 KIỂM TRA & CHỈNH SỬA TỪNG CHƯƠNG")
     
+    # DANH SÁCH CÁC CHƯƠNG KÈM BIỂU TƯỢNG XANH/ĐỎ
     for i in range(len(st.session_state.chunks)):
-        # Tạo khung có thể đóng/mở cho gọn
-        with st.expander(f"📌 {st.session_state.chunks[i]['title']}", expanded=False):
-            
-            # Giao diện chia 2 cột: Trái là Raw, Phải là Bản Dịch
+        result = st.session_state.results.get(i, {})
+        status = result.get("status", "error")
+        title = st.session_state.chunks[i]["title"]
+        
+        # Quyết định icon dựa trên trạng thái
+        icon = "🟢" if status == "ok" else "🔴"
+        
+        with st.expander(f"{icon} {title}", expanded=(status == "error")):
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("**Bản Raw (Tiếng Trung):**")
                 st.info(st.session_state.chunks[i]['content'])
             with c2:
                 st.markdown("**Bản Dịch (Tiếng Việt):**")
-                # Cho phép sửa trực tiếp vào ô text nếu muốn
-                current_trans = st.session_state.results.get(i, {}).get("translated", "")
-                st.success(current_trans)
+                if status == "ok":
+                    st.success(result.get("translated", ""))
+                else:
+                    st.error(result.get("translated", ""))
             
-            # Nút bấm dịch lại riêng cho chương này
-            if st.button(f"🔄 Dịch lại {st.session_state.chunks[i]['title']}", key=f"retry_btn_{i}"):
-                with st.spinner("Đang gọi AI dịch lại chương này..."):
+            if st.button(f"🔄 Thử dịch lại {title}", key=f"retry_btn_{i}"):
+                with st.spinner("Đang gọi AI dịch lại..."):
                     retry_single_chapter(i)
-                st.rerun() # Tải lại giao diện để hiển thị bản dịch mới ngay lập tức
+                st.rerun()
