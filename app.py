@@ -12,7 +12,7 @@ from google.genai import types
 # CẤU HÌNH GIAO DIỆN & BỘ NHỚ
 # ==========================================
 st.set_page_config(page_title="Máy Dịch Đam Mỹ", page_icon="🏳️‍🌈", layout="wide")
-st.title("🏳️‍🌈 Máy Dịch Đam Mỹ (Giám Sát Thời Gian Thực)")
+st.title("🏳️‍🌈 Máy Dịch Đam Mỹ (Giám Sát & UI Gọn Nhẹ)")
 
 if "chunks" not in st.session_state:
     st.session_state.chunks = []
@@ -35,7 +35,7 @@ Giữ nguyên danh từ riêng, võ công... Trừ TÊN NHÂN VẬT, ĐỊA DANH
 Dịch hết đoạn tôi đã gửi, không tự ý thêm bớt. Chỉ output kết quả tiếng Việt!"""
 
 # ==========================================
-# CÁC HÀM TÁCH CHƯƠNG THÔNG MINH
+# CÁC HÀM TÁCH CHƯƠNG THÔNG MINH (NÂNG CẤP)
 # ==========================================
 def split_large_text(title_prefix, text, max_words=2000):
     paragraphs = text.split('\n')
@@ -56,8 +56,10 @@ def split_large_text(title_prefix, text, max_words=2000):
     return chapters
 
 def split_by_chapter_title(text, max_words=2000):
-    regex = r'(?:^|\n)\s*(?:第[\d一二三四五六七八九十百千万零]+[章回节集卷部]|Chapter\s*\d+|Chương\s*\d+)[^\n]*'
+    # Regex Nâng Cấp: Bắt được định dạng "024 - 第23章", "Chương 12", "Chương XII", "第十一章"...
+    regex = r'(?:^|\n)\s*(?:[\dIVXLCDM]+\s*[-_.:]\s*)?(?:第\s*[\d一二三四五六七八九十百千万零]+\s*[章回节集卷部]|Chapter\s*[\dIVXLCDM]+|Chương\s*[\dIVXLCDM]+)[^\n]*'
     matches = list(re.finditer(regex, text, re.IGNORECASE))
+    
     if not matches: 
         return split_large_text("Phần", text, max_words)
     
@@ -75,12 +77,13 @@ def split_by_chapter_title(text, max_words=2000):
     return chapters
 
 # ==========================================
-# HÀM CÔNG NHÂN (LÀM VIỆC ĐỘC LẬP & BÁO CÁO)
+# HÀM CÔNG NHÂN (WORKER)
 # ==========================================
 def process_single_chapter(idx, chunk, api_keys, status_dict):
-    """Hàm này xử lý 1 chương, tự động cập nhật trạng thái ra UI và trả về kết quả"""
-    key = random.choice(api_keys) # Chọn ngẫu nhiên 1 key để phân tải
-    status_dict[idx] = "🔄 Đang dịch..."
+    key = random.choice(api_keys)
+    safe_key = key[:8] + "..." if len(key) > 8 else key 
+    
+    status_dict[idx] = f"🔄 Đang dịch... [Key: {safe_key}]"
     
     retries = 2
     last_error = ""
@@ -98,24 +101,43 @@ def process_single_chapter(idx, chunk, api_keys, status_dict):
             
             response = client.models.generate_content(model="gemini-2.5-flash", contents=chunk["content"], config=config)
             
-            status_dict[idx] = "🟢 Hoàn thành"
-            return idx, {"title": chunk["title"], "translated": response.text, "status": "ok", "error": ""}
+            status_dict[idx] = f"🟢 Hoàn thành [Key: {safe_key}]"
+            return idx, {"title": chunk["title"], "translated": response.text, "status": "ok", "error": "", "key_used": safe_key}
             
         except Exception as e:
             last_error = str(e).strip()
-            # Bắt lỗi phổ biến
             if "429" in last_error or "503" in last_error or "quota" in last_error.lower():
-                status_dict[idx] = f"⚠️ Nghẽn mạng/Quá tải. Thử lại sau 3s... (Còn {retries-1} lần)"
+                status_dict[idx] = f"⚠️ Quá tải [Key: {safe_key}]. Đang tráo Key... (Còn {retries-1} lần)"
                 time.sleep(3)
-                key = random.choice(api_keys) # Đổi key khác
+                key = random.choice(api_keys)
+                safe_key = key[:8] + "..." if len(key) > 8 else key
                 retries -= 1
             else:
-                break # Lỗi do nội dung hoặc lỗi lạ -> Dừng luôn
+                break 
 
-    # Nếu thất bại hoàn toàn
     error_msg = f"Lý do: {last_error}"
-    status_dict[idx] = f"🔴 Thất bại ({error_msg})"
-    return idx, {"title": chunk["title"], "translated": f"❌ KHÔNG THỂ DỊCH PHẦN NÀY.\n\nChi tiết lỗi: {error_msg}", "status": "error", "error": error_msg}
+    status_dict[idx] = f"🔴 Thất bại [Key: {safe_key}]"
+    return idx, {"title": chunk["title"], "translated": f"❌ KHÔNG THỂ DỊCH PHẦN NÀY.\n\nChi tiết lỗi: {error_msg}", "status": "error", "error": error_msg, "key_used": safe_key}
+
+def retry_single_chapter(idx):
+    if not st.session_state.api_keys: return
+    key = random.choice(st.session_state.api_keys)
+    safe_key = key[:8] + "..." if len(key) > 8 else key
+    chunk = st.session_state.chunks[idx]
+    
+    try:
+        client = genai.Client(api_key=key.strip())
+        safety_settings = [
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        ]
+        config = types.GenerateContentConfig(system_instruction=DANMEI_PROMPT, safety_settings=safety_settings, temperature=0.3)
+        response = client.models.generate_content(model="gemini-2.5-flash", contents=chunk["content"], config=config)
+        st.session_state.results[idx] = {"title": chunk["title"], "translated": response.text, "status": "ok", "error": "", "key_used": safe_key}
+    except Exception as e:
+        st.session_state.results[idx] = {"title": chunk["title"], "translated": f"❌ Vẫn bị lỗi: {e}", "status": "error", "error": str(e), "key_used": safe_key}
 
 # ==========================================
 # GIAO DIỆN CHÍNH
@@ -159,7 +181,7 @@ if st.button("🔍 PHÂN TÍCH & XEM TRƯỚC DANH SÁCH CHƯƠNG", use_containe
 st.markdown("---")
 
 # ==========================================
-# BƯỚC 2: DUYỆT & TIẾN HÀNH DỊCH (THỜI GIAN THỰC)
+# BƯỚC 2: DUYỆT & TIẾN HÀNH DỊCH
 # ==========================================
 if st.session_state.show_preview and not st.session_state.results and not st.session_state.is_translating:
     st.markdown("### BƯỚC 2: DUYỆT DANH SÁCH CHƯƠNG")
@@ -175,7 +197,6 @@ if st.session_state.show_preview and not st.session_state.results and not st.ses
         st.session_state.is_translating = True
         st.rerun()
 
-# --- KHU VỰC CHẠY DỊCH & THEO DÕI TRỰC TIẾP ---
 if st.session_state.is_translating:
     st.markdown("### 🔄 ĐANG TRONG QUÁ TRÌNH DỊCH...")
     
@@ -183,25 +204,19 @@ if st.session_state.is_translating:
     total_chunks = len(chunks)
     api_keys = st.session_state.api_keys
     
-    # Chuẩn bị giao diện giám sát
     progress_bar = st.progress(0)
     status_summary = st.empty()
     status_board = st.empty()
     
-    # Khởi tạo bảng trạng thái
     status_dict = {i: "⏳ Đang chờ..." for i in range(total_chunks)}
     final_results = {}
     
-    # BẮT ĐẦU CÁC LUỒNG DỊCH (Giới hạn bằng số Key)
     num_workers = min(len(api_keys), 10)
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Nạp toàn bộ việc cho công nhân
         futures = {executor.submit(process_single_chapter, i, chunk, api_keys, status_dict): i for i, chunk in enumerate(chunks)}
         
-        # Vòng lặp liên tục quét tiến độ mỗi 1 giây
         while futures:
-            # Lấy ra các task đã xong trong 1 giây qua
             done, not_done = concurrent.futures.wait(futures, timeout=1.0, return_when=concurrent.futures.FIRST_COMPLETED)
             
             for f in done:
@@ -209,12 +224,10 @@ if st.session_state.is_translating:
                 final_results[idx] = result
                 del futures[f]
             
-            # --- CẬP NHẬT GIAO DIỆN MỖI GIÂY ---
             done_count = len(final_results)
             progress_bar.progress(done_count / total_chunks)
             status_summary.markdown(f"**Tiến độ:** Hoàn thành **{done_count}/{total_chunks}** chương.")
             
-            # Vẽ bảng trạng thái của tất cả các chương
             board_html = "<div style='height:300px; overflow-y:auto; font-family:monospace; background-color:#f8f9fa; padding:10px; border-radius:5px; border:1px solid #ddd;'>"
             for i in range(total_chunks):
                 color = "black"
@@ -228,7 +241,6 @@ if st.session_state.is_translating:
             
             status_board.markdown(board_html, unsafe_allow_html=True)
             
-    # Chạy xong toàn bộ
     status_summary.success("🎉 ĐÃ DỊCH XONG TOÀN BỘ!")
     time.sleep(1)
     st.session_state.is_translating = False
@@ -236,7 +248,7 @@ if st.session_state.is_translating:
     st.rerun()
 
 # ==========================================
-# BƯỚC 3: KIỂM TRA LỖI, SỬA & TẢI XUỐNG
+# BƯỚC 3: KIỂM TRA LỖI, SỬA & TẢI XUỐNG (UI RÚT GỌN)
 # ==========================================
 if st.session_state.results and not st.session_state.is_translating:
     st.markdown("### BƯỚC 3: KẾT QUẢ & XỬ LÝ LỖI")
@@ -256,37 +268,44 @@ if st.session_state.results and not st.session_state.is_translating:
                 
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
-        st.download_button("📄 TẢI 1 FILE .TXT GỘP (Chỉ gồm phần Thành công)", data=combined_text.encode('utf-8'), file_name="Truyen_Gop.txt", mime="text/plain", use_container_width=True)
+        st.download_button("📄 TẢI 1 FILE .TXT GỘP (Chỉ phần Thành công)", data=combined_text.encode('utf-8'), file_name="Truyen_Gop.txt", mime="text/plain", use_container_width=True)
     with col_dl2:
-        st.download_button("📦 TẢI FILE .ZIP (Chỉ gồm phần Thành công)", data=zip_buffer.getvalue(), file_name="Truyen_Cac_Chuong.zip", mime="application/zip", use_container_width=True)
+        st.download_button("📦 TẢI FILE .ZIP (Chỉ phần Thành công)", data=zip_buffer.getvalue(), file_name="Truyen_Cac_Chuong.zip", mime="application/zip", use_container_width=True)
 
     st.markdown("---")
-    st.markdown("#### BẢNG CHI TIẾT TỪNG PHẦN")
+    st.markdown("#### DANH SÁCH BẢN DỊCH (Bấm vào để xem chi tiết)")
     
-    # Hiển thị list chương với màu sắc rõ ràng
     for i in range(len(st.session_state.chunks)):
         result = st.session_state.results.get(i, {})
         status = result.get("status", "error")
         title = st.session_state.chunks[i]["title"]
+        key_used = result.get("key_used", "Không rõ")
+        translated_text = result.get("translated", "")
+        
+        # Tạo đoạn xem trước (Preview) khoảng 80-100 ký tự để hiện ra ngoài
+        preview_text = translated_text.replace('\n', ' ')[:90] + "..." if translated_text else "Chưa có nội dung..."
+        
         icon = "🟢" if status == "ok" else "🔴"
         
-        # Nếu lỗi thì thẻ tự động mở tung ra
-        with st.expander(f"{icon} {title}", expanded=(status == "error")):
+        # UI Rút gọn: Tiêu đề thẻ sẽ chứa Tên Chương + Đoạn Preview ngắn
+        expander_title = f"{icon} {title} | {preview_text}"
+        
+        with st.expander(expander_title, expanded=(status == "error")):
+            st.caption(f"Dịch bởi API Key: {key_used}")
+            
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("**Bản Raw (Tiếng Trung):**")
-                st.info(st.session_state.chunks[i]['content'])
+                # Giới hạn chiều cao ô text để trang không bị dài lê thê
+                st.text_area("raw", st.session_state.chunks[i]['content'], height=250, key=f"raw_{i}", label_visibility="collapsed")
             with c2:
                 st.markdown("**Bản Dịch (Tiếng Việt):**")
                 if status == "ok":
-                    st.success(result.get("translated", ""))
+                    st.text_area("trans", translated_text, height=250, key=f"trans_{i}", label_visibility="collapsed")
                 else:
                     st.error(f"LỖI HỆ THỐNG TRẢ VỀ: \n{result.get('error', 'Không xác định')}")
             
-            # Nút dịch lại riêng cho các phần bị lỗi
             if st.button(f"🔄 Thử dịch lại phần này", key=f"retry_btn_{i}"):
-                with st.spinner(f"Đang dùng API Key để dịch lại {title}..."):
-                    status_dict_temp = {}
-                    _, new_result = process_single_chapter(i, st.session_state.chunks[i], st.session_state.api_keys, status_dict_temp)
-                    st.session_state.results[i] = new_result
+                with st.spinner(f"Đang tự động dùng API Key khác để dịch lại..."):
+                    retry_single_chapter(i)
                 st.rerun()
