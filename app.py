@@ -137,7 +137,6 @@ def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_sta
     use_fallback = False 
     
     while retries > 0:
-        # LUẬT AN TOÀN: Tuyệt đối không gọi st.session_state ở đây, chỉ dùng shared_state.
         if shared_state.get("stop"):
             status_dict[idx] = "⏸️ Tạm dừng (Lệnh người dùng hoặc kẹt lỗi)"
             return idx, {"title": chunk["title"], "translated": "⏸️ Bị kẹt lỗi / Tạm dừng...", "status": "error", "key_used": "N/A"}
@@ -317,7 +316,24 @@ with tab1:
                 save_project_state() 
                 st.session_state.is_translating = False
                 st.session_state.shared_state["stop"] = False
-                st.success(f"Đã phân tích xong! Hãy chuyển sang Tab **2. Bảng Dịch Thuật**.")
+                
+                # BƯỚC ĐỘT PHÁ CỦA TAB 1: TỰ ĐỘNG XUẤT RAW RA THƯ MỤC
+                if output_dir and os.path.isdir(output_dir.strip()):
+                    raw_folder = os.path.join(output_dir.strip(), st.session_state.novel_name, "RAW")
+                    os.makedirs(raw_folder, exist_ok=True) # Tự tạo thư mục RAW
+                    
+                    for idx_chunk, chunk_item in enumerate(chunks):
+                        safe_title_raw = re.sub(r'[\\/*?:"<>|]', "", chunk_item["title"]).strip()
+                        raw_file_path = os.path.join(raw_folder, f"Raw_Phan_{idx_chunk+1:03d}_{safe_title_raw}.txt")
+                        try:
+                            with open(raw_file_path, "w", encoding="utf-8") as raw_f:
+                                raw_f.write(f"{chunk_item['title']}\n\n{chunk_item['content']}")
+                        except Exception as e:
+                            pass
+                    st.success(f"✅ Đã phân tích xong và TỰ ĐỘNG LƯU BẢN GỐC vào thư mục RAW!\nHãy chuyển sang Tab **2. Bảng Dịch Thuật**.")
+                else:
+                    st.success(f"✅ Đã phân tích xong! Hãy chuyển sang Tab **2. Bảng Dịch Thuật**.")
+                    
                 st.rerun()
 
 with tab2:
@@ -344,7 +360,7 @@ with tab2:
         if output_dir and os.path.isdir(output_dir.strip()):
             novel_folder = os.path.join(output_dir.strip(), current_novel_name)
             os.makedirs(novel_folder, exist_ok=True)
-            st.info(f"📂 Auto-Save ra: `{novel_folder}`")
+            st.info(f"📂 Bản dịch Auto-Save ra: `{novel_folder}`")
 
         if st.session_state.is_translating:
             chunks = st.session_state.chunks
@@ -376,7 +392,6 @@ with tab2:
                         futures[executor.submit(process_single_chapter, i, chunk, active_keys_pool, status_dict, shared_state, lock)] = i
                 
                 while futures:
-                    # Hủy việc nếu người dùng bấm dừng
                     if not st.session_state.is_translating or shared_state.get("stop"):
                         shared_state["stop"] = True
                         break 
