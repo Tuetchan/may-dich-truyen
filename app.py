@@ -8,10 +8,23 @@ import random
 import json
 import threading
 import concurrent.futures
+import tkinter as tk
+from tkinter import filedialog
 from google import genai
 from google.genai import types
 
 st.set_page_config(page_title="AI Translator Pro", page_icon="⚡", layout="wide")
+
+# ==========================================
+# HÀM CHỌN THƯ MỤC TRÊN MÁY TÍNH (TKINTER)
+# ==========================================
+def select_folder():
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    folder_path = filedialog.askdirectory(master=root)
+    root.destroy()
+    return folder_path
 
 # ==========================================
 # KHỞI TẠO BỘ NHỚ VÀ ĐỌC FILE SAVE
@@ -25,11 +38,11 @@ def load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except: pass
-    return {"api_keys": "", "input_dir": "", "output_dir": ""}
+    return {"api_keys": "", "input_dir": "", "output_dir": "", "selected_model": "gemini-3.5-flash"}
 
-def save_config(keys, in_dir, out_dir):
+def save_config(keys, in_dir, out_dir, model):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"api_keys": keys, "input_dir": in_dir, "output_dir": out_dir}, f, ensure_ascii=False)
+        json.dump({"api_keys": keys, "input_dir": in_dir, "output_dir": out_dir, "selected_model": model}, f, ensure_ascii=False)
 
 def save_project_state():
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
@@ -41,18 +54,17 @@ def save_project_state():
 
 app_config = load_config()
 
-if "novel_name" not in st.session_state:
-    st.session_state.novel_name = "Truyen_Moi"
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
-if "results" not in st.session_state:
-    st.session_state.results = {}
-if "is_translating" not in st.session_state:
-    st.session_state.is_translating = False
-if "api_keys" not in st.session_state:
-    st.session_state.api_keys = [k.strip() for k in app_config["api_keys"].split('\n') if k.strip()]
-if "shared_state" not in st.session_state:
-    st.session_state.shared_state = {"stop": False, "success_count": 0, "failed_chapters": 0, "pause_until": 0}
+if "novel_name" not in st.session_state: st.session_state.novel_name = "Truyen_Moi"
+if "chunks" not in st.session_state: st.session_state.chunks = []
+if "results" not in st.session_state: st.session_state.results = {}
+if "is_translating" not in st.session_state: st.session_state.is_translating = False
+if "api_keys" not in st.session_state: st.session_state.api_keys = [k.strip() for k in app_config["api_keys"].split('\n') if k.strip()]
+if "shared_state" not in st.session_state: st.session_state.shared_state = {"stop": False, "success_count": 0, "failed_chapters": 0, "pause_until": 0}
+
+# Lưu State cho Input/Output/Model
+if "input_dir" not in st.session_state: st.session_state.input_dir = app_config.get("input_dir", "")
+if "output_dir" not in st.session_state: st.session_state.output_dir = app_config.get("output_dir", "")
+if "selected_model" not in st.session_state: st.session_state.selected_model = app_config.get("selected_model", "gemini-3.5-flash")
 
 if len(st.session_state.chunks) == 0 and os.path.exists(SAVE_FILE):
     try:
@@ -127,11 +139,10 @@ def split_by_chapter_title(text, max_words=2000):
         chapters.extend(split_large_text(title, content, max_words))
     return chapters
 
-
 # ==========================================
 # CÔNG NHÂN DỊCH (ĐA LUỒNG)
 # ==========================================
-def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_state, lock):
+def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_state, lock, model_name):
     retries = 3 
     last_error = ""
     use_fallback = False 
@@ -150,11 +161,11 @@ def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_sta
         if not active_keys_pool:
             shared_state["stop"] = True
             status_dict[idx] = "🔴 TOÀN BỘ KEY ĐÃ CHẾT!"
-            return idx, {"title": chunk["title"], "translated": "❌ LỖI: Không còn Key khả dụng.", "status": "error", "key_used": "N/A"}
+            return idx, {"title": chunk["title"], "translated": f"❌ LỖI: Không còn Key khả dụng.\n\n[RAW]:\n{chunk['content']}", "status": "error", "key_used": "N/A"}
 
         key = random.choice(active_keys_pool)
         safe_key = key[:8] + "..." 
-        status_dict[idx] = f"🔄 Đang dịch [Key: {safe_key}]" if not use_fallback else f"🔥 Lách Luật 18+ [Key: {safe_key}]"
+        status_dict[idx] = f"🔄 Đang dịch [Key: {safe_key} | Model: {model_name}]" if not use_fallback else f"🔥 Lách Luật 18+ [Key: {safe_key}]"
         
         try:
             client = genai.Client(api_key=key.strip())
@@ -168,7 +179,11 @@ def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_sta
             current_prompt = FALLBACK_PROMPT_18 if use_fallback else UNIVERSAL_PROMPT
             
             config = types.GenerateContentConfig(system_instruction=current_prompt, safety_settings=safety_settings, temperature=0.3)
-            response = client.models.generate_content(model="gemini-3.6-flash", contents=chunk["content"], config=config)
+            response = client.models.generate_content(model=model_name, contents=chunk["content"], config=config)
+            
+            # KIỂM TRA CHỐNG TRANG TRẮNG
+            if not response.text or not response.text.strip():
+                raise ValueError("API trả về trang trắng (Blank response).")
             
             status_dict[idx] = f"🟢 Xong. Nghỉ 5s... [{safe_key}]"
             time.sleep(5) 
@@ -183,6 +198,7 @@ def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_sta
             
         except Exception as e:
             err_msg = str(e).lower()
+            last_error = err_msg
             
             if "quota" in err_msg or "exhausted" in err_msg or "404" in err_msg or "invalid" in err_msg or "not found" in err_msg:
                 status_dict[idx] = f"❌ Key {safe_key} chết. Đang mượn Key khác cứu viện..."
@@ -197,11 +213,16 @@ def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_sta
                     time.sleep(3)
                     retries -= 1
                 else:
-                    status_dict[idx] = f"🔞 18+ Bị chặn hoàn toàn. Bỏ qua."
-                    return idx, {"title": chunk["title"], "translated": f"🔞 CẢNH BÁO 18+ (Đã cố lách luật bằng Hán Việt nhưng Google vẫn chặn).\n\n[RAW]:\n{chunk['content']}", "status": "error", "error": "Safety Block", "key_used": safe_key}
-                
+                    status_dict[idx] = f"🔞 18+ Lỗi bị chặn hoàn toàn. Ghi đè file gốc."
+                    return idx, {"title": chunk["title"], "translated": f"🔞 CẢNH BÁO 18+ (Đã cố lách luật bằng Hán Việt nhưng Google vẫn chặn).\n\n[CHI TIẾT LỖI]: {last_error}\n\n[RAW]:\n{chunk['content']}", "status": "error", "error": "Safety Block", "key_used": safe_key}
+            
+            elif "trang trắng" in err_msg or "blank response" in err_msg:
+                status_dict[idx] = f"⚠️ Lỗi trang trắng. Đang thử lại... (Còn {retries-1})"
+                time.sleep(3)
+                retries -= 1
+
             else:
-                status_dict[idx] = f"⚠️ Lỗi mạng. Thử lại sau 3s... (Còn {retries-1})"
+                status_dict[idx] = f"⚠️ Lỗi mạng/API. Thử lại sau 3s... (Còn {retries-1})"
                 time.sleep(3)
                 retries -= 1
 
@@ -210,17 +231,17 @@ def process_single_chapter(idx, chunk, active_keys_pool, status_dict, shared_sta
         if shared_state["failed_chapters"] >= 2:
             shared_state["stop"] = True
 
-    status_dict[idx] = f"🛑 Thất bại hoàn toàn."
-    return idx, {"title": chunk["title"], "translated": f"❌ LỖI HỆ THỐNG.", "status": "error", "error": last_error, "key_used": "N/A"}
+    status_dict[idx] = f"🛑 Thất bại hoàn toàn: {last_error}"
+    return idx, {"title": chunk["title"], "translated": f"❌ LỖI HỆ THỐNG SAU NHIỀU LẦN THỬ.\n\n[CHI TIẾT LỖI]: {last_error}\n\n[RAW]:\n{chunk['content']}", "status": "error", "error": last_error, "key_used": "N/A"}
 
-def retry_single_chapter(idx, out_dir, novel_name):
+def retry_single_chapter(idx, out_dir, novel_name, model_name):
     if not st.session_state.api_keys: return
     active_pool = st.session_state.api_keys.copy()
     temp_status = {}
     dummy_state = {"stop": False, "success_count": 0, "failed_chapters": 0, "pause_until": 0} 
     dummy_lock = threading.Lock()
     
-    _, result = process_single_chapter(idx, st.session_state.chunks[idx], active_pool, temp_status, dummy_state, dummy_lock)
+    _, result = process_single_chapter(idx, st.session_state.chunks[idx], active_pool, temp_status, dummy_state, dummy_lock, model_name)
     
     st.session_state.results[idx] = result
     save_project_state()
@@ -243,14 +264,40 @@ with st.sidebar:
     keys_input = st.text_area("🔑 API Keys Gemini:", value=app_config["api_keys"], height=150)
     
     st.markdown("---")
+    st.markdown("### 🧠 Chọn Model")
+    model_options = ["gemini-3.1-flash", "gemini-3.5-flash", "gemini-3.7-flash"]
+    if st.session_state.selected_model not in model_options:
+        st.session_state.selected_model = model_options[1]
+    
+    st.session_state.selected_model = st.selectbox("Lựa chọn Model:", model_options, index=model_options.index(st.session_state.selected_model))
+
+    st.markdown("---")
     st.markdown("### 📂 Liên Kết Thư Mục")
-    input_dir = st.text_input("📁 Đường dẫn Input (Nguồn):", value=app_config["input_dir"])
-    output_dir = st.text_input("💾 Đường dẫn Output (Đích):", value=app_config["output_dir"])
+    
+    col_in1, col_in2 = st.columns([3, 1])
+    with col_in1:
+        st.session_state.input_dir = st.text_input("📁 Input (Nguồn):", value=st.session_state.input_dir)
+    with col_in2:
+        if st.button("📁 Mở", key="btn_in"):
+            folder = select_folder()
+            if folder:
+                st.session_state.input_dir = folder
+                st.rerun()
+
+    col_out1, col_out2 = st.columns([3, 1])
+    with col_out1:
+        st.session_state.output_dir = st.text_input("💾 Output (Đích):", value=st.session_state.output_dir)
+    with col_out2:
+        if st.button("📁 Mở", key="btn_out"):
+            folder = select_folder()
+            if folder:
+                st.session_state.output_dir = folder
+                st.rerun()
     
     if st.button("Lưu cấu hình", use_container_width=True):
-        save_config(keys_input, input_dir, output_dir)
+        save_config(keys_input, st.session_state.input_dir, st.session_state.output_dir, st.session_state.selected_model)
         st.session_state.api_keys = [k.strip() for k in keys_input.split('\n') if k.strip()]
-        st.toast("✅ Đã lưu cấu hình vĩnh viễn (Chống F5)!")
+        st.toast("✅ Đã lưu cấu hình vĩnh viễn!")
 
     st.markdown("---")
     st.markdown("### ✂️ Tùy chọn Tách Chương")
@@ -279,6 +326,10 @@ current_novel_name = st.session_state.get("novel_name", "Truyen_Moi")
 with tab1:
     if st.session_state.chunks:
         st.warning(f"⚠️ Đang có dữ liệu của truyện: **{current_novel_name}**. Chuyển sang Tab 2 để dịch tiếp.")
+        st.markdown("### 📑 Danh sách tất cả các chương:")
+        # Hiển thị list chương
+        for i, c in enumerate(st.session_state.chunks):
+            st.text(f"Chương {i+1}: {c['title']}")
     else:
         st.markdown("#### Nạp nội dung cần dịch")
         novel_name_input = st.text_input("🏷️ Tên bộ truyện (Dùng để tạo thư mục lưu file):", value="Truyen_Moi")
@@ -288,10 +339,10 @@ with tab1:
         if st.button("🔍 PHÂN TÍCH & LÊN DANH SÁCH", use_container_width=True):
             api_keys = [k.strip() for k in keys_input.split('\n') if k.strip()]
             final_raw_text = ""
-            if input_dir and os.path.isdir(input_dir.strip()):
-                for filename in sorted(os.listdir(input_dir.strip())):
+            if st.session_state.input_dir and os.path.isdir(st.session_state.input_dir.strip()):
+                for filename in sorted(os.listdir(st.session_state.input_dir.strip())):
                     if filename.endswith(".txt"):
-                        filepath = os.path.join(input_dir.strip(), filename)
+                        filepath = os.path.join(st.session_state.input_dir.strip(), filename)
                         with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                             final_raw_text += f"\n\n{f.read()}\n\n"
             elif uploaded_file is not None:
@@ -304,7 +355,7 @@ with tab1:
             else:
                 st.session_state.api_keys = api_keys
                 st.session_state.novel_name = re.sub(r'[\\/*?:"<>|]', "", novel_name_input).strip()
-                save_config(keys_input, input_dir, output_dir)
+                save_config(keys_input, st.session_state.input_dir, st.session_state.output_dir, st.session_state.selected_model)
                 
                 if split_method == "Tự động nhận diện Chương":
                     chunks = split_by_chapter_title(final_raw_text, max_words=word_count)
@@ -317,10 +368,9 @@ with tab1:
                 st.session_state.is_translating = False
                 st.session_state.shared_state["stop"] = False
                 
-                # BƯỚC ĐỘT PHÁ CỦA TAB 1: TỰ ĐỘNG XUẤT RAW RA THƯ MỤC
-                if output_dir and os.path.isdir(output_dir.strip()):
-                    raw_folder = os.path.join(output_dir.strip(), st.session_state.novel_name, "RAW")
-                    os.makedirs(raw_folder, exist_ok=True) # Tự tạo thư mục RAW
+                if st.session_state.output_dir and os.path.isdir(st.session_state.output_dir.strip()):
+                    raw_folder = os.path.join(st.session_state.output_dir.strip(), st.session_state.novel_name, "RAW")
+                    os.makedirs(raw_folder, exist_ok=True)
                     
                     for idx_chunk, chunk_item in enumerate(chunks):
                         safe_title_raw = re.sub(r'[\\/*?:"<>|]', "", chunk_item["title"]).strip()
@@ -357,39 +407,67 @@ with tab2:
         st.markdown("---")
         
         novel_folder = ""
-        if output_dir and os.path.isdir(output_dir.strip()):
-            novel_folder = os.path.join(output_dir.strip(), current_novel_name)
+        if st.session_state.output_dir and os.path.isdir(st.session_state.output_dir.strip()):
+            novel_folder = os.path.join(st.session_state.output_dir.strip(), current_novel_name)
             os.makedirs(novel_folder, exist_ok=True)
             st.info(f"📂 Bản dịch Auto-Save ra: `{novel_folder}`")
+            
+        st.markdown("### 📑 Danh sách & Tiến độ chương (Báo lỗi tại đây)")
 
-        if st.session_state.is_translating:
-            chunks = st.session_state.chunks
-            total_chunks = len(chunks)
-            active_keys_pool = st.session_state.api_keys.copy()
-            
-            progress_bar = st.progress(0)
-            status_summary = st.empty()
-            status_board = st.empty()
-            
-            final_results = st.session_state.results.copy()
-            status_dict = {}
-            for i in range(total_chunks):
-                if i in final_results and final_results[i].get("status") == "ok":
+        chunks = st.session_state.chunks
+        total_chunks = len(chunks)
+        active_keys_pool = st.session_state.api_keys.copy()
+        
+        progress_bar = st.progress(0)
+        status_summary = st.empty()
+        status_board = st.empty()
+        
+        final_results = st.session_state.results.copy()
+        status_dict = {}
+        
+        for i in range(total_chunks):
+            if i in final_results:
+                if final_results[i].get("status") == "ok":
                     used_key = final_results[i].get('key_used', 'N/A')
                     status_dict[i] = f"🟢 Hoàn thành [Key: {used_key}]"
                 else:
-                    status_dict[i] = "⏳ Đang chờ xếp hàng..."
+                    err = final_results[i].get('error', 'Lỗi không xác định')
+                    status_dict[i] = f"🛑 Thất bại: {err}"
+            else:
+                status_dict[i] = "⏳ Đang chờ..."
+
+        def render_board():
+            board_html = "<div style='height:450px; overflow-y:auto; font-family:monospace; background-color:#1e1e1e; color:#d4d4d4; padding:15px; border-radius:8px;'>"
+            for idx in range(total_chunks):
+                color = "#d4d4d4"
+                if "☕" in status_dict[idx]: color = "#a78bfa"
+                elif "🔥" in status_dict[idx]: color = "#f97316"
+                elif "Đang dịch" in status_dict[idx]: color = "#60a5fa"
+                elif "🟢" in status_dict[idx]: color = "#4ade80"
+                elif "⏸️" in status_dict[idx]: color = "#9ca3af"
+                elif "🔞" in status_dict[idx]: color = "#ec4899"
+                elif "Thất bại" in status_dict[idx] or "❌" in status_dict[idx] or "🛑" in status_dict[idx]: color = "#f87171"
+                elif "⚠️" in status_dict[idx] or "🗑️" in status_dict[idx] or "⏳" in status_dict[idx]: color = "#fbbf24"
+                
+                board_html += f"<div style='margin-bottom:8px; border-bottom:1px solid #333; padding-bottom:4px;'><strong style='color:#fff;'>Chương {idx+1} | {chunks[idx]['title']}:</strong> <span style='color:{color};'>{status_dict[idx]}</span></div>"
+            board_html += "</div>"
+            status_board.markdown(board_html, unsafe_allow_html=True)
             
+        if not st.session_state.is_translating:
+            done_count = sum(1 for v in final_results.values() if v.get("status") == "ok")
+            progress_bar.progress(done_count / total_chunks if total_chunks > 0 else 0)
+            render_board()
+
+        if st.session_state.is_translating:
             shared_state = st.session_state.shared_state
             lock = threading.Lock()
-            
             num_workers = len(active_keys_pool) if active_keys_pool else 1
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {}
                 for i, chunk in enumerate(chunks):
                     if "Hoàn thành" not in status_dict[i]: 
-                        futures[executor.submit(process_single_chapter, i, chunk, active_keys_pool, status_dict, shared_state, lock)] = i
+                        futures[executor.submit(process_single_chapter, i, chunk, active_keys_pool, status_dict, shared_state, lock, st.session_state.selected_model)] = i
                 
                 while futures:
                     if not st.session_state.is_translating or shared_state.get("stop"):
@@ -411,8 +489,8 @@ with tab2:
                             except Exception as e:
                                 pass 
 
-                        st.session_state.results = final_results
-                        save_project_state()
+                    st.session_state.results = final_results
+                    save_project_state()
                     
                     done_count = sum(1 for v in final_results.values() if v.get("status") == "ok")
                     progress_bar.progress(done_count / total_chunks)
@@ -425,24 +503,10 @@ with tab2:
                         time_left = int(shared_state.get("pause_until") - time.time())
                         key_msg = f"☕ Đang tạm nghỉ 60s... (Còn {time_left}s) | 🟢 Đội hình Key: {alive_keys_str}"
                     else:
-                        key_msg = f"🟢 Đang cày ({len(active_keys_pool)} Key): {alive_keys_str}" if active_keys_pool else "🔴 CÁC KEY ĐỀU CHẾT!"
+                        key_msg = f"🟢 Đang cày ({len(active_keys_pool)} Key): {alive_keys_str} | Model: {st.session_state.selected_model}" if active_keys_pool else "🔴 CÁC KEY ĐỀU CHẾT!"
                     
                     status_summary.markdown(f"**Tiến độ:** Hoàn thành **{done_count}/{total_chunks}** chương.<br>**Tình trạng Key:** {key_msg}", unsafe_allow_html=True)
-                    
-                    board_html = "<div style='height:350px; overflow-y:auto; font-family:monospace; background-color:#1e1e1e; color:#d4d4d4; padding:15px; border-radius:8px;'>"
-                    for i in range(total_chunks):
-                        color = "#d4d4d4"
-                        if "☕" in status_dict[i]: color = "#a78bfa"
-                        elif "🔥" in status_dict[i]: color = "#f97316"
-                        elif "Đang dịch" in status_dict[i]: color = "#60a5fa"
-                        elif "🟢" in status_dict[i]: color = "#4ade80"
-                        elif "⏸️" in status_dict[i]: color = "#9ca3af"
-                        elif "🔞" in status_dict[i]: color = "#ec4899"
-                        elif "Thất bại" in status_dict[i] or "❌" in status_dict[i] or "🛑" in status_dict[i]: color = "#f87171"
-                        elif "⚠️" in status_dict[i] or "🗑️" in status_dict[i] or "⏳" in status_dict[i]: color = "#fbbf24"
-                        board_html += f"<div style='margin-bottom:6px;'><strong style='color:#fff;'>{chunks[i]['title']}:</strong> <span style='color:{color};'>{status_dict[i]}</span></div>"
-                    board_html += "</div>"
-                    status_board.markdown(board_html, unsafe_allow_html=True)
+                    render_board()
                     
             if not st.session_state.is_translating or shared_state.get("stop"):
                 status_summary.error("🛑 PHIÊN LÀM VIỆC ĐÃ DỪNG LẠI.")
@@ -458,8 +522,8 @@ with tab3:
         st.info("👈 Chưa có dữ liệu truyện.")
     else:
         novel_folder = ""
-        if output_dir and os.path.isdir(output_dir.strip()):
-            novel_folder = os.path.join(output_dir.strip(), current_novel_name)
+        if st.session_state.output_dir and os.path.isdir(st.session_state.output_dir.strip()):
+            novel_folder = os.path.join(st.session_state.output_dir.strip(), current_novel_name)
 
         st.markdown("#### 1. Lưu Trữ & Xuất Bản Dịch")
         if novel_folder and os.path.isdir(novel_folder):
@@ -502,13 +566,13 @@ with tab3:
             preview_text = translated_text.replace('\n', ' ')[:90] + "..." if translated_text else "Chưa có nội dung..."
             icon = "🟢" if status == "ok" else "🔴"
             
-            with st.expander(f"{icon} {title} | {preview_text}", expanded=(status == "error")):
+            with st.expander(f"{icon} Chương {i+1}: {title} | {preview_text}", expanded=(status == "error")):
                 st.caption(f"Dịch bởi API Key: **{result.get('key_used', 'Chưa rõ/Thất bại')}**")
                 
                 c1, c2 = st.columns(2)
                 with c1: st.text_area("Bản Raw:", st.session_state.chunks[i]['content'], height=200, key=f"raw_{i}")
-                with c2: st.text_area("Bản Dịch:", translated_text, height=200, key=f"trans_{i}")
+                with c2: st.text_area("Bản Dịch / Thông báo Lỗi:", translated_text, height=200, key=f"trans_{i}")
                 
-                if st.button(f"🔄 Dịch lại {title}", key=f"retry_btn_{i}"):
-                    retry_single_chapter(i, output_dir, current_novel_name)
+                if st.button(f"🔄 Dịch lại Chương {i+1}", key=f"retry_btn_{i}"):
+                    retry_single_chapter(i, st.session_state.output_dir, current_novel_name, st.session_state.selected_model)
                     st.rerun()
